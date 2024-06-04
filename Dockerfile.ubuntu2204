@@ -1,0 +1,86 @@
+#hadolint global ignore=SC2016,SC2164,DL3005,DL3008,DL3015,DL3042
+
+FROM nvidia/cuda:12.1.1-devel-ubuntu22.04 AS cuda
+SHELL ["/bin/bash", "-xeu", "-o", "pipefail", "-c"]
+ARG DEBIAN_FRONTEND=noninteractive
+
+COPY <<'EOF' /etc/apt/apt.conf.d/99-no-install-recommends
+Apt::Install-Recommends "false";
+EOF
+
+# https://lists.ubuntu.com/archives/ubuntu-announce/2024-February/000299.html
+ARG SNAPSHOT=20240222T180000Z
+
+RUN --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    --mount=type=cache,target=/var/cache/apt,sharing=locked <<-'EOS'
+    mv /etc/apt/sources.list.d/*.list /tmp/
+
+    # updating apt is required for snapshot if the version is older than 2.4.11
+    if [ "$( (dpkg -s apt | awk '/^Version: /{print $2}'; echo 2.4.11) | sort -V | head -n 1)" != "2.4.11" ]; then
+        apt-get -y update
+        apt-get -y install apt
+    fi
+
+    sed -i -r "s!(deb |deb-src )!\1[snapshot=$SNAPSHOT trusted=yes] !g" /etc/apt/sources.list
+
+    cat <<'EOF' | tee /etc/apt/preferences.d/zz-snapshot
+Package: *
+Pin: origin "snapshot.ubuntu.com"
+Pin-Priority: 1001
+EOF
+
+    apt-get -y update
+    apt-get -y upgrade --allow-downgrades
+    apt-get -y dist-upgrade --allow-downgrades
+    apt-get -y install --fix-broken
+    apt-get -y autoremove --purge
+
+    rm -f /etc/apt/preferences.d/zz-snapshot
+
+    mv /tmp/*.list /etc/apt/sources.list.d/
+EOS
+
+RUN apt-mark hold cuda-toolkit{-12,}-config-common
+
+# https://gitlab.com/nvidia/container-images/cuda/-/blob/master/dist/12.1.1/ubuntu2204/devel/cudnn8/Dockerfile
+ENV NV_CUDNN_VERSION=8.9.2.26
+ENV NV_CUDNN_PACKAGE_NAME=libcudnn8
+ENV NV_CUDNN_PACKAGE=libcudnn8=$NV_CUDNN_VERSION-1+cuda12.1
+ENV NV_CUDNN_PACKAGE_DEV=libcudnn8-dev=$NV_CUDNN_VERSION-1+cuda12.1
+LABEL com.nvidia.cudnn.version="${NV_CUDNN_VERSION}"
+
+RUN --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    --mount=type=cache,target=/var/cache/apt,sharing=locked <<-'EOS'
+    apt-get -y update
+    apt-get -y install --allow-change-held-packages $NV_CUDNN_PACKAGE $NV_CUDNN_PACKAGE_DEV
+    apt-mark hold ${NV_CUDNN_PACKAGE/=*/} ${NV_CUDNN_PACKAGE_DEV/=*/}
+EOS
+
+# https://gitlab.com/nvidia/container-images/cuda/-/tree/master/dist/12.1.1/ubuntu2204/devel/Dockerfile
+ENV NV_LIBNCCL_PACKAGE_NAME=libnccl2
+ENV NV_LIBNCCL_PACKAGE_VERSION=2.20.5-1
+ENV NV_LIBNCCL_PACKAGE=$NV_LIBNCCL_PACKAGE_NAME=$NV_LIBNCCL_PACKAGE_VERSION+cuda12.4
+ENV NV_LIBNCCL_DEV_PACKAGE_NAME=libnccl-dev
+ENV NV_LIBNCCL_DEV_PACKAGE_VERSION=2.20.5-1
+ENV NV_LIBNCCL_DEV_PACKAGE=$NV_LIBNCCL_DEV_PACKAGE_NAME=$NV_LIBNCCL_DEV_PACKAGE_VERSION+cuda12.4
+ENV NCCL_VERSION=2.20.5-1
+
+RUN --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    --mount=type=cache,target=/var/cache/apt,sharing=locked <<-'EOS'
+    apt-get -y update
+    apt-get -y install --allow-change-held-packages $NV_LIBNCCL_PACKAGE $NV_LIBNCCL_DEV_PACKAGE
+    apt-mark hold ${NV_LIBNCCL_PACKAGE/=*/} ${NV_LIBNCCL_DEV_PACKAGE/=*/}
+EOS
+
+RUN --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    --mount=type=cache,target=/var/cache/apt,sharing=locked <<-'EOS'
+    apt-get -y update
+    apt-get -y install gcc g++
+    apt-get -y install libtinfo-dev zlib1g-dev build-essential libedit-dev libxml2-dev
+    apt-get -y install llvm-dev libclang-dev
+EOS
+
+RUN --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get -y update && apt-get -y install git curl
+
